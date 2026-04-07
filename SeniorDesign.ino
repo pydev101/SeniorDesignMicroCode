@@ -7,6 +7,7 @@
 #include <vector>
 #include <cmath>
 #include <cstdint>
+#include <atomic>
 
 
 // --- Configuration -----------------------------------------------------
@@ -48,7 +49,7 @@
 #define WS_PIN 17 // pWS is DEFINED as pBCLK+1
 #define SD_PIN 18
 
-// TODO DMUX, LCD, OCT, AMUX, VERIFY I2S
+// TODO VERIFY DMUX, LCD, OCT, AMUX, I2S
 // TODO Add volitile and mutexs
 
 constexpr int SAMPLE_RATE = 44100;
@@ -146,15 +147,47 @@ Note myNote2(500.0f, 1.5f, 0.8f, 0.5f, 1.0f);
 
 // Setup CORE 0
 void setup() {
-  i2s.setBitsPerSample(16);
-
-  i2s.begin(SAMPLE_RATE); // Sample rate
   Serial.begin(115200);
+  
+  i2s.setBitsPerSample(16); // TODO Move to core 1
+  i2s.begin(SAMPLE_RATE);
 
+  // Digital In
+  pinMode(DMUX_OUT, INPUT);
+  pinMode(DMUX_OUT, INPUT_PULLDOWN); // TODO Pullup or pull down?
+  pinMode(OCT_DOWN_P, INPUT);
+  pinMode(OCT_DOWN_P, INPUT_PULLDOWN);
+  pinMode(OCT_UP_P, INPUT);
+  pinMode(OCT_UP_P, INPUT_PULLDOWN);
+  
+  pinMode(DMUX_S0, OUTPUT);
+  pinMode(DMUX_S1, OUTPUT);
+  pinMode(DMUX_S2, OUTPUT);
+  pinMode(DMUX_S3, OUTPUT);
+  pinMode(DMUX_S4, OUTPUT);
+  pinMode(DMUX_S5, OUTPUT);
+  
+  pinMode(AMUX_S0, OUTPUT);
+  pinMode(AMUX_S1, OUTPUT);
+  pinMode(AMUX_S2, OUTPUT);
+
+  pinMode(AMUX_OUT, INPUT);
+  pinMode(AUDIO_IN, INPUT);
+}
+
+std::atomic<unsigned long int> x; //32 bits
+void scanInputs(){
+  // Key Press Scanning
+
+  // Pent Scanning
+  
 }
 
 // Loop CORE 0
 void loop() {
+  // Input Scanning
+  
+  
     // Process Note
     while(Serial.available() > 0){
         char x = Serial.read();
