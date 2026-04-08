@@ -56,8 +56,7 @@ uint32_t AMUXIN_MASKS[3];
 #define WS_PIN 17 // pWS is DEFINED as pBCLK+1
 #define SD_PIN 18
 
-// TODO VERIFY DMUX, LCD, OCT, AMUX, I2S
-// TODO Add volitile and mutexs
+// TODO VERIFY LCD, OCT, AMUX
 
 constexpr int SAMPLE_RATE = 44100;
 constexpr int MAX_AMPLITUDE = 32767;
@@ -150,8 +149,7 @@ public:
     }
 };
 
-int getKey(int key) {
-    int idx = key - 1; // 0-28
+int getKey(int idx) {
     int reg = 0;
 
     if (idx < 24) {
@@ -171,7 +169,7 @@ int getKey(int key) {
 
     // Waste time
     sleep_us(2);
-    
+
     // Fast Read: Check if the DMUX_OUT pin bit is set in the input register
     return (sio_hw->gpio_in & (1ul << DMUX_OUT)) ? 1 : 0;
 }
@@ -201,7 +199,7 @@ typedef struct{
   float D;
   float S;
   float R;
-  int flag;
+  int flags;
 } SharedInfo;
 
 std::atomic<SharedInfo> SHARED_inputs;
@@ -217,6 +215,7 @@ const int screenPeriod = 10000; //uS or slower (Must be slower than the funtion,
 const int rawInputLen = 3;
 unsigned long int lastRAWInputs[rawInputLen];
 unsigned int lawRAWInputsIndex = 0;
+int lastKeyPress = 0;
 
 bool scanInputs(struct repeating_timer *t){
   updateInputFlag = true;
@@ -237,11 +236,8 @@ void setup() {
 
   // Digital In
   pinMode(DMUX_OUT, INPUT);
-  pinMode(DMUX_OUT, INPUT_PULLDOWN);
   pinMode(OCT_DOWN_P, INPUT);
-  pinMode(OCT_DOWN_P, INPUT_PULLDOWN);
   pinMode(OCT_UP_P, INPUT);
-  pinMode(OCT_UP_P, INPUT_PULLDOWN);
 
   // Digital Out
   for(int i = 0; i < 6; i++) {
@@ -250,7 +246,7 @@ void setup() {
     DMUXIN_MASKS[i] = (1ul << DMUXIN_PINS[i]); // Pre-calculate the bitmask
   }
 
-  for(int i = 0; i < 6; i++) {
+  for(int i = 0; i < 3; i++) {
     gpio_init(AMUXIN_PINS[i]);
     gpio_set_dir(AMUXIN_PINS[i], GPIO_OUT);
     AMUXIN_MASKS[i] = (1ul << AMUXIN_PINS[i]); // Pre-calculate the bitmask
@@ -272,11 +268,12 @@ void loop() {
     // Key Press Scanning
     unsigned long int inputs = 0;
     
-    // TODO Adust to match key
-    for(int i=0; i<29; i++){
+    for(int i=0; i<25; i++){
       inputs |= getKey(i)<<i;
     }
-    
+
+    inputs = ~inputs; // TODO TEMP while pull down resistor problem gets fixed
+
     // Debounce logic (Pins are pulled low by default thus any high would start immediate attack; Any high pins will stay high creating debounce logic prevening premature release)
     lastRAWInputs[lawRAWInputsIndex] = inputs;
     lawRAWInputsIndex = (lawRAWInputsIndex + 1) % rawInputLen; // Circular buffer for inputs
@@ -285,12 +282,24 @@ void loop() {
     for(int i=0; i<rawInputLen; i++){
       inputs |= lastRAWInputs[i]; // Keep any high bits high (immedate attack); only once all previous samples of the bit is clear then the key is released (debounce)
     }
-    
-    // TODO XOR Compare new input and old input to figure out which rightmost bit was last pressed
-    newInfo.lastKey = 0;
-    
-    // Send inputs to digital synth
     newInfo.keyInputs = inputs;
+    
+
+    long int changedANDdepressed = (oldInfo.keyInputs ^ inputs) & inputs;
+    if(changedANDdepressed > 0){
+      for(int i=0; i<32; i++){
+        if((changedANDdepressed>>i)&1){
+          lastKeyPress = i;
+        }
+      }
+    }
+    newInfo.lastKey = lastKeyPress;
+
+
+    Serial.print(inputs, BIN);
+    Serial.print(", ");
+    Serial.print(newInfo.lastKey + 1);
+    Serial.println();
     
     // Pent Scanning
     float A = 0; // Bounds?
@@ -303,6 +312,7 @@ void loop() {
     SHARED_inputs = newInfo;
     updateInputFlag = false;
   }
+  
   if(updateScreenFlag){
     // TODO
     updateScreenFlag = false;
@@ -319,13 +329,15 @@ void setup1() {
 }
 
 Note myNote(440.0f, 3.0f, 1.0f, 0.4f, 3.0f); // TODO Implement all notes
-Note myNote2(500.0f, 1.5f, 0.8f, 0.5f, 1.0f);
+Note myNote2(20000.0f, 1.5f, 0.8f, 0.5f, 1.0f);
 
 // Loop CORE 1
 void loop1() {
   SharedInfo newInfo = SHARED_inputs;
 
   // TODO Update Inputs, Configs here
+  myNote.updateInput((newInfo.keyInputs >> 0)& 1 > 0); // Key 1
+  myNote2.updateInput((newInfo.keyInputs >> 9)& 1 > 0); // Key 10
   
   // Clear buffer
   for (int i = 0; i < GENERATION_SAMPLES; i++){
@@ -333,7 +345,7 @@ void loop1() {
       samples[i] = 0;
   }
   
-  myNote.getSample(); // TODO Implement thread safe input (copy data to local var then distribute)
+  myNote.getSample();
   myNote2.getSample();
   
   for (int i = 0; i < GENERATION_SAMPLES; i++) {
