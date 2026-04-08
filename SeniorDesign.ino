@@ -34,6 +34,9 @@ uint32_t DMUXIN_MASKS[6];
 #define AMUX_S1 20
 #define AMUX_S2 21
 
+const uint8_t AMUXIN_PINS[] = {AMUX_S0, AMUX_S1, AMUX_S2};
+uint32_t AMUXIN_MASKS[3];
+
 // Screen - Owned by Core 0
 #define LCD_MISO 8
 #define LCD_CS 9
@@ -93,10 +96,10 @@ public:
     }
 
     void updateControls(float a, float d, float s, float r) {
-        A = (a < MIN_AMP_ANALOG) ? MIN_AMP_ANALOG : a;
-        D = (d < MIN_AMP_ANALOG) ? MIN_AMP_ANALOG : d;
+        A = (a < 0) ? 0 : a;
+        D = (d < 0) ? 0 : d;
         S = (s < 0.0f) ? 0.0f : (s > 1.0f ? 1.0f : s);
-        R = (r < MIN_AMP_ANALOG) ? MIN_AMP_ANALOG : r;
+        R = (r < 0) ? 0 : r;
 
         ASlope = SAMPLE_PERIOD / A;
         DSlope = ((S - 1.0f) / D) * SAMPLE_PERIOD;
@@ -166,48 +169,67 @@ int getKey(int key) {
         }
     }
 
-    delayMicroseconds(5); // Minimum time for electrical settling
+    // Waste time
+    sleep_us(2);
     
     // Fast Read: Check if the DMUX_OUT pin bit is set in the input register
     return (sio_hw->gpio_in & (1ul << DMUX_OUT)) ? 1 : 0;
 }
 
-std::atomic<unsigned long int> SHARED_inputs; //32 bits
+//0-3
+float readAnalog(int key){
+  // Set AMUX
+  for (int b = 0; b < 3; b++) {
+    if ((key >> b) & 1) {
+        sio_hw->gpio_set = AMUXIN_MASKS[b]; // Atomic SET
+    } else {
+        sio_hw->gpio_clr = AMUXIN_MASKS[b]; // Atomic CLEAR
+    }
+  }
+
+  sleep_us(2);
+  
+  // Read Analog
+  return (float)analogRead(AMUX_OUT)/(1024.0f);
+}
+
+
+typedef struct{
+  unsigned long int keyInputs;
+  int lastKey;
+  float A;
+  float D;
+  float S;
+  float R;
+  int flag;
+} SharedInfo;
+
+std::atomic<SharedInfo> SHARED_inputs;
+SharedInfo oldInfo = {0, 0, 0, 0, 0, 0, 0};
+
+volatile bool updateInputFlag = false;
+volatile bool updateScreenFlag = false;
 
 // Humans feel lag in >15mS
 const int scanPeriod = 5000; //uS or slower (Must be slower than the funtion, but faster than at least 5mS)
+const int screenPeriod = 10000; //uS or slower (Must be slower than the funtion, but faster than at least 5mS)
+
 const int rawInputLen = 3;
 unsigned long int lastRAWInputs[rawInputLen];
 unsigned int lawRAWInputsIndex = 0;
 
 bool scanInputs(struct repeating_timer *t){
-  // Key Press Scanning
-  unsigned long int inputs = 0;
-  for(int i=0; i<29; i++){
-    inputs |= getKey(i)<<i;
-  }
+  updateInputFlag = true;
+  return true;
+}
 
-  // Debounce logic (Pins are pulled low by default thus any high would start immediate attack; Any high pins will stay high creating debounce logic prevening premature release)
-  lastRAWInputs[lawRAWInputsIndex] = inputs;
-  lawRAWInputsIndex = (lawRAWInputsIndex + 1) % rawInputLen; // Circular buffer for inputs
-
-  inputs = 0;
-  for(int i=0; i<rawInputLen; i++){
-      inputs |= lastRAWInputs[i]; // Keep any high bits high (immedate attack); only once all previous samples of the bit is clear then the key is released (debounce)
-  }
-  
-  // Send inputs to digital synth
-  SHARED_inputs.store(inputs, std::memory_order_release);
-
-  
-  // Pent Scanning
-  // TODO, need filter (EMA?), minimum steps?
-  // TODO Add Update Flag
-
+bool updateScreen(struct repeating_timer *t){
+  updateScreenFlag = true;
   return true;
 }
 
 struct repeating_timer scanTimer;
+struct repeating_timer screenTimer;
 
 // Setup CORE 0
 void setup() {
@@ -228,20 +250,63 @@ void setup() {
     DMUXIN_MASKS[i] = (1ul << DMUXIN_PINS[i]); // Pre-calculate the bitmask
   }
 
-  pinMode(AMUX_S0, OUTPUT);
-  pinMode(AMUX_S1, OUTPUT);
-  pinMode(AMUX_S2, OUTPUT);
+  for(int i = 0; i < 6; i++) {
+    gpio_init(AMUXIN_PINS[i]);
+    gpio_set_dir(AMUXIN_PINS[i], GPIO_OUT);
+    AMUXIN_MASKS[i] = (1ul << AMUXIN_PINS[i]); // Pre-calculate the bitmask
+  }
 
   // Analog IN
   pinMode(AMUX_OUT, INPUT);
   pinMode(AUDIO_IN, INPUT);
 
   add_repeating_timer_us(-scanPeriod, scanInputs, NULL, &scanTimer);
+  add_repeating_timer_us(-screenPeriod, updateScreen, NULL, &screenTimer);
 }
 
 // Loop CORE 0
 void loop() {
-  // TODO Update Screen
+  if(updateInputFlag){
+    SharedInfo newInfo = {0, 0, 0, 0, 0, 0, 0};
+    
+    // Key Press Scanning
+    unsigned long int inputs = 0;
+    
+    // TODO Adust to match key
+    for(int i=0; i<29; i++){
+      inputs |= getKey(i)<<i;
+    }
+    
+    // Debounce logic (Pins are pulled low by default thus any high would start immediate attack; Any high pins will stay high creating debounce logic prevening premature release)
+    lastRAWInputs[lawRAWInputsIndex] = inputs;
+    lawRAWInputsIndex = (lawRAWInputsIndex + 1) % rawInputLen; // Circular buffer for inputs
+    
+    inputs = 0;
+    for(int i=0; i<rawInputLen; i++){
+      inputs |= lastRAWInputs[i]; // Keep any high bits high (immedate attack); only once all previous samples of the bit is clear then the key is released (debounce)
+    }
+    
+    // TODO XOR Compare new input and old input to figure out which rightmost bit was last pressed
+    newInfo.lastKey = 0;
+    
+    // Send inputs to digital synth
+    newInfo.keyInputs = inputs;
+    
+    // Pent Scanning
+    float A = 0; // Bounds?
+    // TODO, need filter (EMA?), minimum steps?
+    // TODO Add Update Flag
+    
+    // TODO Octave select
+    
+    oldInfo = newInfo;
+    SHARED_inputs = newInfo;
+    updateInputFlag = false;
+  }
+  if(updateScreenFlag){
+    // TODO
+    updateScreenFlag = false;
+  }
 }
 
 /// CORE 1 -------------------------------------------------
@@ -258,6 +323,10 @@ Note myNote2(500.0f, 1.5f, 0.8f, 0.5f, 1.0f);
 
 // Loop CORE 1
 void loop1() {
+  SharedInfo newInfo = SHARED_inputs;
+
+  // TODO Update Inputs, Configs here
+  
   // Clear buffer
   for (int i = 0; i < GENERATION_SAMPLES; i++){
       sampleValues[i] = 0;
