@@ -143,7 +143,11 @@ public:
                 }
             }
 
-            sampleValues[i] += amp * sinf(phase); // TODO Sine lookup table or parabolic approx if pure sine function is too slow when several notes play
+            //sampleValues[i] += amp * sinf(phase); // TODO Sine lookup table or parabolic approx if pure sine function is too slow when several notes play
+
+            constexpr float B = 4.0f / 3.14159265f;
+            constexpr float C = -4.0f / (3.14159265f * 3.14159265f);
+            sampleValues[i] = amp * (B * phase + C * phase * std::abs(phase));
 
             phase += phaseStep;
             if (phase >= PI) phase -= TWOPI; // Bound between -PI and PI
@@ -283,9 +287,9 @@ void setup() {
 
 float stableAnalogRead[4] = {-1,-1,-1,-1};
 void loop() {
-    // TODO Time and ensure fast enough
     if (updateInputFlag) {
-        
+        // Timed at 500uS - 4/16/26 at 1:28pm
+
         SharedInfo newInfo = {0, 0, 0, 0, 0, 0};
 
         // --- Key scanning -----------------------------------
@@ -312,6 +316,10 @@ void loop() {
             }
         }
         newInfo.lastKey = lastKeyPress;
+
+
+        // TODO Test keys and generation
+        Serial.println(newInfo.keyInputs, BIN);
 
         // --- Pot scanning (all 4 channels) ------------------------------
         bool flagAnalog = false;
@@ -348,6 +356,7 @@ void loop() {
         updateInputFlag = false;
     }
 
+    // TODO Each chunk must be less than 4mS pref 3mS
     if (updateScreenFlag) {
         SharedInfo info = SHARED_inputs;
 
@@ -479,7 +488,6 @@ Note notes[numNotes] = {
 };
 
 // Loop CORE 1
-// TODO Time and ensure speed
 void loop1() {
     SharedInfo newInfo = SHARED_inputs;
     uint8_t readFlags = SHARED_flags;
@@ -489,30 +497,30 @@ void loop1() {
         notes[newInfo.lastKey].updateControls(newInfo.A, newInfo.D, newInfo.S, newInfo.R);
     }
 
-    for(int i=0; i<numNotes; i++){
-        notes[i].updateInput((newInfo.keyInputs >> i)& 1 > 0); // Key 1
-    }
-
     // Clear buffer
     for (int i = 0; i < GENERATION_SAMPLES; i++){
         sampleValues[i] = 0;
         samples[i] = 0;
     }
 
+    unsigned long shiftKeyInputs = newInfo.keyInputs;
+
     for(int i=0; i<numNotes; i++){
-        notes[i].getSample();
+        notes[i].updateInput(((shiftKeyInputs >> i) & 1) > 0); // TODO Ensure actually works
+        notes[i].getSample(); // TODO Test with keyboard so not all high by default
     }
 
     for (int i = 0; i < GENERATION_SAMPLES; i++) {
         float v = sampleValues[i];
         
-        // Soft clipping
+        // Soft clipping (2uS)
         if (v > 1.0f) v = 0.66f;
         else if (v < -1.0f) v = -0.66f;
         else v = v - 0.33f * v * v * v;
 
         samples[i] = (int16_t)(v * MAX_AMPLITUDE);
-        i2s.write(samples[i]);
-        i2s.write(samples[i]);
+        i2s.write(samples[i]); // TODO Takes 10 uS each per sample
+        i2s.write(samples[i]); 
     }
+
 }
