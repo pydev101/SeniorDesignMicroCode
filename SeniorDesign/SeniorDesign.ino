@@ -285,6 +285,7 @@ float stableAnalogRead[4] = {-1,-1,-1,-1};
 void loop() {
     // TODO Time and ensure fast enough
     if (updateInputFlag) {
+        
         SharedInfo newInfo = {0, 0, 0, 0, 0, 0};
 
         // --- Key scanning -----------------------------------
@@ -323,8 +324,10 @@ void loop() {
             }
 
             if(v >= 0.05){
+                if(stableAnalogRead[ch] > 0){ // Failsafe to prevent overriding defaults when initalizing
+                    flagAnalog = true;
+                }
                 stableAnalogRead[ch] = rawAnalogRead[ch];
-                flagAnalog = true;
             }
         }
 
