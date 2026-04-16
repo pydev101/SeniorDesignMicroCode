@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <atomic>
 #include "hardware/timer.h"
+#include "hardware/adc.h"
 
 // --- Configuration -----------------------------------------------------
 
@@ -175,7 +176,9 @@ int getKey(int idx) {
 }
 
 //0-3
-float readAnalog(int key){
+constexpr int NumSV = 5;
+
+int readAnalog(int key){
   // Set AMUX
   for (int b = 0; b < 3; b++) {
     if ((key >> b) & 1) {
@@ -184,11 +187,15 @@ float readAnalog(int key){
         sio_hw->gpio_clr = AMUXIN_MASKS[b]; // Atomic CLEAR
     }
   }
-
-  sleep_us(2);
   
   // Read Analog
-  return (float)analogRead(AMUX_OUT)/(1024.0f);
+  return analogRead(AMUX_OUT);
+  int sum = 0;
+
+  sum = (adc_hw->result) & 0xFFF;
+  //sum = sum & (~((1<<4) - 1));
+
+  return sum;
 }
 
 
@@ -254,7 +261,12 @@ void setup() {
 
   // Analog IN
   pinMode(AMUX_OUT, INPUT);
-  pinMode(AUDIO_IN, INPUT);
+  //adc_init();
+  //adc_gpio_init(AMUX_OUT); // Pin 27
+  //adc_select_input(1);     // ADC1 is GPIO 27
+  //adc_run(true);           // Start free-running mode
+  
+  //pinMode(AUDIO_IN, INPUT);
 
   add_repeating_timer_us(-scanPeriod, scanInputs, NULL, &scanTimer);
   add_repeating_timer_us(-screenPeriod, updateScreen, NULL, &screenTimer);
@@ -272,7 +284,7 @@ void loop() {
       inputs |= getKey(i)<<i;
     }
 
-    inputs = ~inputs; // TODO TEMP while pull down resistor problem gets fixed
+    // inputs = ~inputs; // TODO TEMP while pull down resistor problem gets fixed
 
     // Debounce logic (Pins are pulled low by default thus any high would start immediate attack; Any high pins will stay high creating debounce logic prevening premature release)
     lastRAWInputs[lawRAWInputsIndex] = inputs;
@@ -294,15 +306,16 @@ void loop() {
       }
     }
     newInfo.lastKey = lastKeyPress;
-
-
-    Serial.print(inputs, BIN);
-    Serial.print(", ");
-    Serial.print(newInfo.lastKey + 1);
-    Serial.println();
     
     // Pent Scanning
-    float A = 0; // Bounds?
+    int A = readAnalog(0);
+    //int B = readAnalog(1);
+    //int C = readAnalog(2);
+    //int D = readAnalog(3);
+    Serial.print(A);
+    Serial.print(" ");
+    Serial.println(A, BIN);
+
     // TODO, need filter (EMA?), minimum steps?
     // TODO Add Update Flag
     
