@@ -2,6 +2,7 @@
 #include <pio_i2s.pio.h>
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
+#include "st7789_display.hpp"
 #include <stdio.h>
 #include <math.h>
 #include <vector>
@@ -58,6 +59,8 @@ uint32_t AMUXIN_MASKS[3];
 #define SD_PIN 18
 
 // TODO VERIFY LCD, OCT, AMUX
+
+static Display disp(spi1, LCD_SCK, LCD_MOSI, LCD_CS, LCD_RS, LCD_RST);
 
 constexpr int SAMPLE_RATE = 44100;
 constexpr int MAX_AMPLITUDE = 32767;
@@ -169,44 +172,50 @@ int getKey(int idx) {
     }
 
     // Waste time
-    sleep_us(2);
+    for(int i=0; i<300; i++){
+        asm volatile ("NOP");
+    }
 
     // Fast Read: Check if the DMUX_OUT pin bit is set in the input register
     return (sio_hw->gpio_in & (1ul << DMUX_OUT)) ? 1 : 0;
 }
 
-//0-3
-constexpr int NumSV = 5;
+float rawAnalogRead[4];
 
-int readAnalog(int key){
-  // Set AMUX
-  for (int b = 0; b < 3; b++) {
-    if ((key >> b) & 1) {
-        sio_hw->gpio_set = AMUXIN_MASKS[b]; // Atomic SET
-    } else {
-        sio_hw->gpio_clr = AMUXIN_MASKS[b]; // Atomic CLEAR
+void readAnalog() {
+    sio_hw->gpio_clr = AMUXIN_MASKS[2];  // S2 always 0 for channels 0-3
+
+    for (int ch = 0; ch < 4; ch++) {
+        // Set S0 from bit 0 of ch
+        if (ch & 0x01) {
+            sio_hw->gpio_set = AMUXIN_MASKS[0];
+        } else {
+            sio_hw->gpio_clr = AMUXIN_MASKS[0];
+        }
+
+        // Set S1 from bit 1 of ch
+        if (ch & 0x02) {
+            sio_hw->gpio_set = AMUXIN_MASKS[1];
+        } else {
+            sio_hw->gpio_clr = AMUXIN_MASKS[1];
+        }
+
+        delayMicroseconds(50);    // allow AMUX output to settle
+        analogRead(AMUX_OUT);     // dummy read to flush ADC sample-and-hold
+        delayMicroseconds(10);
+
+        targets[ch] = analogRead(AMUX_OUT) / 1023.0f;
     }
-  }
-  
-  // Read Analog
-  return analogRead(AMUX_OUT);
-  int sum = 0;
-
-  sum = (adc_hw->result) & 0xFFF;
-  //sum = sum & (~((1<<4) - 1));
-
-  return sum;
 }
 
-
-typedef struct{
-  unsigned long int keyInputs;
-  int lastKey;
-  float A;
-  float D;
-  float S;
-  float R;
-  int flags;
+typedef struct {
+    unsigned long int keyInputs;
+    int lastKey;
+    float A;
+    float D;
+    float S;
+    float R;
+    int flags;
 } SharedInfo;
 
 std::atomic<SharedInfo> SHARED_inputs;
@@ -237,105 +246,176 @@ bool updateScreen(struct repeating_timer *t){
 struct repeating_timer scanTimer;
 struct repeating_timer screenTimer;
 
-// Setup CORE 0
+// =============================================================================
+// SETUP — CORE 0
+// =============================================================================
 void setup() {
-  Serial.begin(115200);
+    Serial.begin(115200);
 
-  // Digital In
-  pinMode(DMUX_OUT, INPUT);
-  pinMode(OCT_DOWN_P, INPUT);
-  pinMode(OCT_UP_P, INPUT);
+    // Digital In
+    pinMode(DMUX_OUT, INPUT);
+    pinMode(OCT_DOWN_P, INPUT);
+    pinMode(OCT_UP_P, INPUT);
+    pinMode(AMUX_OUT, INPUT);
 
-  // Digital Out
-  for(int i = 0; i < 6; i++) {
+    // Digital Out
+    for(int i = 0; i < 6; i++) {
     gpio_init(DMUXIN_PINS[i]);
     gpio_set_dir(DMUXIN_PINS[i], GPIO_OUT);
     DMUXIN_MASKS[i] = (1ul << DMUXIN_PINS[i]); // Pre-calculate the bitmask
-  }
+    }
 
-  for(int i = 0; i < 3; i++) {
+    for(int i = 0; i < 3; i++) {
     gpio_init(AMUXIN_PINS[i]);
     gpio_set_dir(AMUXIN_PINS[i], GPIO_OUT);
     AMUXIN_MASKS[i] = (1ul << AMUXIN_PINS[i]); // Pre-calculate the bitmask
-  }
+    }
 
-  // Analog IN
-  pinMode(AMUX_OUT, INPUT);
-  //adc_init();
-  //adc_gpio_init(AMUX_OUT); // Pin 27
-  //adc_select_input(1);     // ADC1 is GPIO 27
-  //adc_run(true);           // Start free-running mode
-  
-  //pinMode(AUDIO_IN, INPUT);
-
-  add_repeating_timer_us(-scanPeriod, scanInputs, NULL, &scanTimer);
-  add_repeating_timer_us(-screenPeriod, updateScreen, NULL, &screenTimer);
+    add_repeating_timer_us(-scanPeriod,   scanInputs,   NULL, &scanTimer);
+    add_repeating_timer_us(screenPeriod, updateScreen, NULL, &screenTimer);
 }
 
-// Loop CORE 0
+// =============================================================================
+// LOOP — CORE 0
+// =============================================================================
 void loop() {
-  if(updateInputFlag){
-    SharedInfo newInfo = {0, 0, 0, 0, 0, 0, 0};
-    
-    // Key Press Scanning
-    unsigned long int inputs = 0;
-    
-    for(int i=0; i<25; i++){
-      inputs |= getKey(i)<<i;
-    }
+    if (updateInputFlag) {
+        SharedInfo newInfo = {0, 0, 0, 0, 0, 0, 0};
 
-    // inputs = ~inputs; // TODO TEMP while pull down resistor problem gets fixed
-
-    // Debounce logic (Pins are pulled low by default thus any high would start immediate attack; Any high pins will stay high creating debounce logic prevening premature release)
-    lastRAWInputs[lawRAWInputsIndex] = inputs;
-    lawRAWInputsIndex = (lawRAWInputsIndex + 1) % rawInputLen; // Circular buffer for inputs
-    
-    inputs = 0;
-    for(int i=0; i<rawInputLen; i++){
-      inputs |= lastRAWInputs[i]; // Keep any high bits high (immedate attack); only once all previous samples of the bit is clear then the key is released (debounce)
-    }
-    newInfo.keyInputs = inputs;
-    
-
-    long int changedANDdepressed = (oldInfo.keyInputs ^ inputs) & inputs;
-    if(changedANDdepressed > 0){
-      for(int i=0; i<32; i++){
-        if((changedANDdepressed>>i)&1){
-          lastKeyPress = i;
+        // --- Key scanning ---
+        unsigned long int inputs = 0;
+        for (int i = 0; i < 25; i++) {
+            inputs |= getKey(i) << i;
         }
-      }
-    }
-    newInfo.lastKey = lastKeyPress;
-    
-    // Pent Scanning
-    int A = readAnalog(0);
-    //int B = readAnalog(1);
-    //int C = readAnalog(2);
-    //int D = readAnalog(3);
-    Serial.print(A);
-    Serial.print(" ");
-    Serial.println(A, BIN);
 
-    // TODO, need filter (EMA?), minimum steps?
-    // TODO Add Update Flag
-    
-    // TODO Octave select
-    
-    oldInfo = newInfo;
-    SHARED_inputs = newInfo;
-    updateInputFlag = false;
-  }
-  
-  if(updateScreenFlag){
-    // TODO
-    updateScreenFlag = false;
-  }
+        lastRAWInputs[lawRAWInputsIndex] = inputs;
+        lawRAWInputsIndex = (lawRAWInputsIndex + 1) % rawInputLen;
+
+        inputs = 0;
+        for (int i = 0; i < rawInputLen; i++) {
+            inputs |= lastRAWInputs[i];
+        }
+        newInfo.keyInputs = inputs;
+
+        long int changedANDdepressed = (oldInfo.keyInputs ^ inputs) & inputs;
+        if (changedANDdepressed > 0) {
+            for (int i = 0; i < 32; i++) {
+                if ((changedANDdepressed >> i) & 1) {
+                    lastKeyPress = i;
+                }
+            }
+        }
+        newInfo.lastKey = lastKeyPress;
+
+        // --- Pot scanning (all 4 channels) ---
+        readAnalog(newInfo);
+        // TODO Filter and add to shared info
+        // TODO Verify actually works
+        // TODO Add threshold and seperate analog flag for updating; merge threshold here and the display; match max and min value from display to adjustments
+
+        oldInfo = newInfo;
+        SHARED_inputs = newInfo;
+
+        updateInputFlag = false;
+    }
+
+    if (updateScreenFlag) {
+        SharedInfo info = SHARED_inputs;
+
+        float a = info.A;
+        float d = info.D;
+        float s = info.S;
+        float r = info.R;
+
+        // Static elements drawn once on first call
+        static bool screenInitialised = false;
+        if (!screenInitialised) {
+            disp.fill_screen(BLACK);
+
+            disp.rect(  4, 32,  28, 282, CYAN, 4);
+            disp.rect( 38, 32,  28, 282, CYAN, 4);
+            disp.rect(414, 32,  28, 282, CYAN, 4);
+            disp.rect(448, 32,  28, 282, CYAN, 4);
+            disp.rect( 72, 32, 335, 282, CYAN, 4);
+
+            disp.char_draw(  6, 4, 'A', CYAN, NO_BG, 3);
+            disp.char_draw( 40, 4, 'D', CYAN, NO_BG, 3);
+            disp.char_draw(416, 4, 'S', CYAN, NO_BG, 3);
+            disp.char_draw(450, 4, 'R', CYAN, NO_BG, 3);
+            disp.text(132, 4, "ENVELOPE", CYAN, NO_BG, 3);
+            disp.draw_logo(324, 4, CYAN, NO_BG);
+
+            screenInitialised = true;
+        }
+
+        // Only redraw if a value changed beyond threshold
+        static float last_a = -1.0f, last_d = -1.0f,
+                     last_s = -1.0f, last_r = -1.0f;
+        static const float THRESHOLD = 0.02f;
+
+        bool changed = fabsf(a - last_a) >= THRESHOLD ||
+                       fabsf(d - last_d) >= THRESHOLD ||
+                       fabsf(s - last_s) >= THRESHOLD ||
+                       fabsf(r - last_r) >= THRESHOLD;
+
+        if (changed) {
+            // Redraw bars
+            float bar_data[4] = { a, d, s, r };
+            static const int X_STARTS[4] = { 10,  44, 420, 454 };
+            static const int X_STOPS[4]  = { 29,  63, 439, 473 };
+
+            for (int i = 0; i < 4; i++) {
+                disp.graph_bar_from_array(
+                    X_STARTS[i], X_STOPS[i], 308,
+                    bar_data, i,
+                    16, 270.0f, CYAN, (int32_t)BLACK);
+            }
+
+            // Erase old envelope with black lines, draw new envelope
+            static int prev_x[5] = {-1, -1, -1, -1, -1};
+            static int prev_y[5] = {-1, -1, -1, -1, -1};
+
+            const int d_px   = (int)(27 * d);
+            const int s_px   = (int)(27 * s);
+            const int r_px   = (int)(27 * r);
+            const int peak_y = (int)(119 - 70 * a);
+
+            const int new_x[5] = {
+                81,
+                116,
+                151 + d_px,
+                269 + d_px + s_px,
+                316 + d_px + s_px + r_px
+            };
+            const int new_y[5] = { 289, peak_y, 202, 202, 289 };
+
+            if (prev_x[0] != -1) {
+                for (int i = 0; i < 4; i++) {
+                    disp.line(prev_x[i], prev_y[i],
+                              prev_x[i+1], prev_y[i+1], BLACK);
+                }
+            }
+
+            for (int i = 0; i < 4; i++) {
+                disp.line(new_x[i], new_y[i],
+                          new_x[i+1], new_y[i+1], CYAN);
+            }
+
+            for (int i = 0; i < 5; i++) {
+                prev_x[i] = new_x[i];
+                prev_y[i] = new_y[i];
+            }
+
+            last_a = a; last_d = d; last_s = s; last_r = r;
+        }
+
+        updateScreenFlag = false;
+    }
 }
 
-/// CORE 1 -------------------------------------------------
-// Digital Syth Core
-
-// Setup CORE 1
+// =============================================================================
+// CORE 1 — Digital Synth
+// =============================================================================
 void setup1() {
   i2s.setBitsPerSample(16);
   i2s.begin(SAMPLE_RATE);
