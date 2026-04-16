@@ -58,8 +58,6 @@ uint32_t AMUXIN_MASKS[3];
 #define WS_PIN 17 // pWS is DEFINED as pBCLK+1
 #define SD_PIN 18
 
-// TODO VERIFY LCD, OCT, AMUX
-
 static Display disp(spi1, LCD_SCK, LCD_MOSI, LCD_CS, LCD_RS, LCD_RST);
 
 constexpr int SAMPLE_RATE = 44100;
@@ -204,7 +202,7 @@ void readAnalog() {
         analogRead(AMUX_OUT);     // dummy read to flush ADC sample-and-hold
         delayMicroseconds(10);
 
-        targets[ch] = analogRead(AMUX_OUT) / 1023.0f;
+        rawAnalogRead[ch] = analogRead(AMUX_OUT) / 1023.0;
     }
 }
 
@@ -215,11 +213,11 @@ typedef struct {
     float D;
     float S;
     float R;
-    int flags;
 } SharedInfo;
 
 std::atomic<SharedInfo> SHARED_inputs;
-SharedInfo oldInfo = {0, 0, 0, 0, 0, 0, 0};
+std::atomic<uint8_t> SHARED_flags;
+SharedInfo oldInfo = {0, 0, 0, 0, 0, 0};
 
 volatile bool updateInputFlag = false;
 volatile bool updateScreenFlag = false;
@@ -227,6 +225,7 @@ volatile bool updateScreenFlag = false;
 // Humans feel lag in >15mS
 const int scanPeriod = 5000; //uS or slower (Must be slower than the funtion, but faster than at least 5mS)
 const int screenPeriod = 10000; //uS or slower (Must be slower than the funtion, but faster than at least 5mS)
+constexpr int numNotes = 25;
 
 const int rawInputLen = 3;
 unsigned long int lastRAWInputs[rawInputLen];
@@ -239,7 +238,8 @@ bool scanInputs(struct repeating_timer *t){
 }
 
 bool updateScreen(struct repeating_timer *t){
-  updateScreenFlag = true;
+  //updateScreenFlag = true;
+  // TODO Time and intergrate
   return true;
 }
 
@@ -278,13 +278,18 @@ void setup() {
 // =============================================================================
 // LOOP — CORE 0
 // =============================================================================
-void loop() {
-    if (updateInputFlag) {
-        SharedInfo newInfo = {0, 0, 0, 0, 0, 0, 0};
 
-        // --- Key scanning ---
+
+
+float stableAnalogRead[4] = {-1,-1,-1,-1};
+void loop() {
+    // TODO Time and ensure fast enough
+    if (updateInputFlag) {
+        SharedInfo newInfo = {0, 0, 0, 0, 0, 0};
+
+        // --- Key scanning -----------------------------------
         unsigned long int inputs = 0;
-        for (int i = 0; i < 25; i++) {
+        for (int i = 0; i < numNotes; i++) {
             inputs |= getKey(i) << i;
         }
 
@@ -299,7 +304,7 @@ void loop() {
 
         long int changedANDdepressed = (oldInfo.keyInputs ^ inputs) & inputs;
         if (changedANDdepressed > 0) {
-            for (int i = 0; i < 32; i++) {
+            for (int i = 0; i < numNotes; i++) {
                 if ((changedANDdepressed >> i) & 1) {
                     lastKeyPress = i;
                 }
@@ -307,14 +312,35 @@ void loop() {
         }
         newInfo.lastKey = lastKeyPress;
 
-        // --- Pot scanning (all 4 channels) ---
-        readAnalog(newInfo);
-        // TODO Filter and add to shared info
-        // TODO Verify actually works
-        // TODO Add threshold and seperate analog flag for updating; merge threshold here and the display; match max and min value from display to adjustments
+        // --- Pot scanning (all 4 channels) ------------------------------
+        bool flagAnalog = false;
+
+        readAnalog();
+        for (int ch = 0; ch < 4; ch++) {
+            float v = rawAnalogRead[ch] - stableAnalogRead[ch];
+            if(v < 0){
+                v = -v;
+            }
+
+            if(v >= 0.05){
+                stableAnalogRead[ch] = rawAnalogRead[ch];
+                flagAnalog = true;
+            }
+        }
+
+        // TODO make this log ish for between 0.001 and 1 s; GOodl what standard times are
+        newInfo.A = stableAnalogRead[0]*0.1;
+        newInfo.D = stableAnalogRead[0]*0.1;
+        newInfo.R = stableAnalogRead[0]*0.1;
+
+        newInfo.S = stableAnalogRead[0]; // Stays between 0 and 1
 
         oldInfo = newInfo;
         SHARED_inputs = newInfo;
+
+        if(flagAnalog){
+            SHARED_flags = 1;
+        }
 
         updateInputFlag = false;
     }
@@ -421,36 +447,69 @@ void setup1() {
   i2s.begin(SAMPLE_RATE);
 }
 
-Note myNote(440.0f, 3.0f, 1.0f, 0.4f, 3.0f); // TODO Implement all notes
-Note myNote2(20000.0f, 1.5f, 0.8f, 0.5f, 1.0f);
+Note notes[numNotes] = {
+    Note(82.4f, 0.05f, 0.05f, 0.7f, 0.05f),   // E2
+    Note(87.3f, 0.05f, 0.05f, 0.7f, 0.05f),   // F2
+    Note(98.0f, 0.05f, 0.05f, 0.7f, 0.05f),   // G2
+    Note(110.0f, 0.05f, 0.05f, 0.7f, 0.05f),  // A2
+    Note(123.47f, 0.05f, 0.05f, 0.7f, 0.05f), // B2
+    Note(130.81f, 0.05f, 0.05f, 0.7f, 0.05f), // C3
+    Note(146.83f, 0.05f, 0.05f, 0.7f, 0.05f), // D3
+    Note(164.81f, 0.05f, 0.05f, 0.7f, 0.05f), // E3
+    Note(174.61f, 0.05f, 0.05f, 0.7f, 0.05f), // F3
+    Note(196.0f, 0.05f, 0.05f, 0.7f, 0.05f),  // G3
+    Note(220.0f, 0.05f, 0.05f, 0.7f, 0.05f),  // A3
+    Note(246.94f, 0.05f, 0.05f, 0.7f, 0.05f), // B3
+    Note(261.63f, 0.05f, 0.05f, 0.7f, 0.05f), // C4 (Middle C)
+    Note(293.67f, 0.05f, 0.05f, 0.7f, 0.05f), // D4
+    Note(329.63f, 0.05f, 0.05f, 0.7f, 0.05f), // E4
+    Note(349.23f, 0.05f, 0.05f, 0.7f, 0.05f), // F4
+    Note(392.0f, 0.05f, 0.05f, 0.7f, 0.05f),  // G4
+    Note(440.0f, 0.05f, 0.05f, 0.7f, 0.05f),  // A4
+    Note(493.88f, 0.05f, 0.05f, 0.7f, 0.05f), // B4
+    Note(523.25f, 0.05f, 0.05f, 0.7f, 0.05f), // C5
+    Note(587.33f, 0.05f, 0.05f, 0.7f, 0.05f), // D5
+    Note(659.26f, 0.05f, 0.05f, 0.7f, 0.05f), // E5
+    Note(698.46f, 0.05f, 0.05f, 0.7f, 0.05f), // F5
+    Note(783.99f, 0.05f, 0.05f, 0.7f, 0.05f), // G5
+    Note(880.00f, 0.05f, 0.05f, 0.7f, 0.05f)  // A5
+};
 
 // Loop CORE 1
+// TODO Time and ensure speed
 void loop1() {
-  SharedInfo newInfo = SHARED_inputs;
+    SharedInfo newInfo = SHARED_inputs;
+    uint8_t readFlags = SHARED_flags;
 
-  // TODO Update Inputs, Configs here
-  myNote.updateInput((newInfo.keyInputs >> 0)& 1 > 0); // Key 1
-  myNote2.updateInput((newInfo.keyInputs >> 9)& 1 > 0); // Key 10
-  
-  // Clear buffer
-  for (int i = 0; i < GENERATION_SAMPLES; i++){
-      sampleValues[i] = 0;
-      samples[i] = 0;
-  }
-  
-  myNote.getSample();
-  myNote2.getSample();
-  
-  for (int i = 0; i < GENERATION_SAMPLES; i++) {
-      float v = sampleValues[i];
-      
-      // Soft clipping
-      if (v > 1.0f) v = 0.66f;
-      else if (v < -1.0f) v = -0.66f;
-      else v = v - 0.33f * v * v * v;
-  
-      samples[i] = (int16_t)(v * MAX_AMPLITUDE);
-      i2s.write(samples[i]);
-      i2s.write(samples[i]);
-  }
+    if(readFlags > 0){
+        SHARED_flags = 0;
+        notes[newInfo.lastKey].updateControls(newInfo.A, newInfo.D, newInfo.S, newInfo.R);
+    }
+
+    for(int i=0; i<numNotes; i++){
+        notes[i].updateInput((newInfo.keyInputs >> i)& 1 > 0); // Key 1
+    }
+
+    // Clear buffer
+    for (int i = 0; i < GENERATION_SAMPLES; i++){
+        sampleValues[i] = 0;
+        samples[i] = 0;
+    }
+
+    for(int i=0; i<numNotes; i++){
+        notes[i].getSample();
+    }
+
+    for (int i = 0; i < GENERATION_SAMPLES; i++) {
+        float v = sampleValues[i];
+        
+        // Soft clipping
+        if (v > 1.0f) v = 0.66f;
+        else if (v < -1.0f) v = -0.66f;
+        else v = v - 0.33f * v * v * v;
+
+        samples[i] = (int16_t)(v * MAX_AMPLITUDE);
+        i2s.write(samples[i]);
+        i2s.write(samples[i]);
+    }
 }
