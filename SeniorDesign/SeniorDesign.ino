@@ -147,7 +147,10 @@ public:
 
             constexpr float B = 4.0f / 3.14159265f;
             constexpr float C = -4.0f / (3.14159265f * 3.14159265f);
-            sampleValues[i] = amp * (B * phase + C * phase * std::abs(phase));
+            constexpr float P = 0.225f;
+            float y = (B * phase + C * phase * std::abs(phase));
+            y = P * (y * std::abs(y) - y) + y;   
+            sampleValues[i] += amp * y;
 
             phase += phaseStep;
             if (phase >= PI) phase -= TWOPI; // Bound between -PI and PI
@@ -317,10 +320,6 @@ void loop() {
         }
         newInfo.lastKey = lastKeyPress;
 
-
-        // TODO Test keys and generation
-        Serial.println(newInfo.keyInputs, BIN);
-
         // --- Pot scanning (all 4 channels) ------------------------------
         bool flagAnalog = false;
 
@@ -459,32 +458,36 @@ void setup1() {
   i2s.begin(SAMPLE_RATE);
 }
 
+#define AS 0.01f
+#define DS 0.01f
+#define SS 0.3f
+#define RS 0.01f
 Note notes[numNotes] = {
-    Note(82.4f, 0.05f, 0.05f, 0.7f, 0.05f),   // E2
-    Note(87.3f, 0.05f, 0.05f, 0.7f, 0.05f),   // F2
-    Note(98.0f, 0.05f, 0.05f, 0.7f, 0.05f),   // G2
-    Note(110.0f, 0.05f, 0.05f, 0.7f, 0.05f),  // A2
-    Note(123.47f, 0.05f, 0.05f, 0.7f, 0.05f), // B2
-    Note(130.81f, 0.05f, 0.05f, 0.7f, 0.05f), // C3
-    Note(146.83f, 0.05f, 0.05f, 0.7f, 0.05f), // D3
-    Note(164.81f, 0.05f, 0.05f, 0.7f, 0.05f), // E3
-    Note(174.61f, 0.05f, 0.05f, 0.7f, 0.05f), // F3
-    Note(196.0f, 0.05f, 0.05f, 0.7f, 0.05f),  // G3
-    Note(220.0f, 0.05f, 0.05f, 0.7f, 0.05f),  // A3
-    Note(246.94f, 0.05f, 0.05f, 0.7f, 0.05f), // B3
-    Note(261.63f, 0.05f, 0.05f, 0.7f, 0.05f), // C4 (Middle C)
-    Note(293.67f, 0.05f, 0.05f, 0.7f, 0.05f), // D4
-    Note(329.63f, 0.05f, 0.05f, 0.7f, 0.05f), // E4
-    Note(349.23f, 0.05f, 0.05f, 0.7f, 0.05f), // F4
-    Note(392.0f, 0.05f, 0.05f, 0.7f, 0.05f),  // G4
-    Note(440.0f, 0.05f, 0.05f, 0.7f, 0.05f),  // A4
-    Note(493.88f, 0.05f, 0.05f, 0.7f, 0.05f), // B4
-    Note(523.25f, 0.05f, 0.05f, 0.7f, 0.05f), // C5
-    Note(587.33f, 0.05f, 0.05f, 0.7f, 0.05f), // D5
-    Note(659.26f, 0.05f, 0.05f, 0.7f, 0.05f), // E5
-    Note(698.46f, 0.05f, 0.05f, 0.7f, 0.05f), // F5
-    Note(783.99f, 0.05f, 0.05f, 0.7f, 0.05f), // G5
-    Note(880.00f, 0.05f, 0.05f, 0.7f, 0.05f)  // A5
+    Note(82.4f,   AS, DS, SS, RS), // E2
+    Note(87.3f,   AS, DS, SS, RS), // F2
+    Note(98.0f,   AS, DS, SS, RS), // G2
+    Note(110.0f,  AS, DS, SS, RS), // A2
+    Note(123.47f, AS, DS, SS, RS), // B2
+    Note(130.81f, AS, DS, SS, RS), // C3
+    Note(146.83f, AS, DS, SS, RS), // D3
+    Note(164.81f, AS, DS, SS, RS), // E3
+    Note(174.61f, AS, DS, SS, RS), // F3
+    Note(196.0f,  AS, DS, SS, RS), // G3
+    Note(220.0f,  AS, DS, SS, RS), // A3
+    Note(246.94f, AS, DS, SS, RS), // B3
+    Note(261.63f, AS, DS, SS, RS), // C4 (Middle C)
+    Note(293.67f, AS, DS, SS, RS), // D4
+    Note(329.63f, AS, DS, SS, RS), // E4
+    Note(349.23f, AS, DS, SS, RS), // F4
+    Note(392.0f,  AS, DS, SS, RS), // G4
+    Note(440.0f,  AS, DS, SS, RS), // A4
+    Note(493.88f, AS, DS, SS, RS), // B4
+    Note(523.25f, AS, DS, SS, RS), // C5
+    Note(587.33f, AS, DS, SS, RS), // D5
+    Note(659.26f, AS, DS, SS, RS), // E5
+    Note(698.46f, AS, DS, SS, RS), // F5
+    Note(783.99f, AS, DS, SS, RS), // G5
+    Note(880.00f, AS, DS, SS, RS)  // A5
 };
 
 // Loop CORE 1
@@ -494,7 +497,7 @@ void loop1() {
 
     if(readFlags > 0){
         SHARED_flags = 0;
-        notes[newInfo.lastKey].updateControls(newInfo.A, newInfo.D, newInfo.S, newInfo.R);
+        //notes[newInfo.lastKey].updateControls(newInfo.A, newInfo.D, newInfo.S, newInfo.R);
     }
 
     // Clear buffer
@@ -519,6 +522,7 @@ void loop1() {
         else v = v - 0.33f * v * v * v;
 
         samples[i] = (int16_t)(v * MAX_AMPLITUDE);
+
         i2s.write(samples[i]); // TODO Takes 10 uS each per sample
         i2s.write(samples[i]); 
     }
