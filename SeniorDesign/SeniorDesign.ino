@@ -58,6 +58,10 @@ uint32_t AMUXIN_MASKS[3];
 #define WS_PIN 17 // pWS is DEFINED as pBCLK+1
 #define SD_PIN 18
 
+#define DEFAULT_OCTAVE 4
+#define MIN_OCTAVE 2
+#define MAX_OCTAVE 5
+
 static Display disp(spi1, LCD_SCK, LCD_MOSI, LCD_CS, LCD_RS, LCD_RST);
 
 constexpr int SAMPLE_RATE = 44100;
@@ -73,8 +77,11 @@ int16_t samples[GENERATION_SAMPLES];
 
 I2S i2s(OUTPUT, SCK_PIN, SD_PIN);
 
+int octave = DEFAULT_OCTAVE;
+
 class Note {
 public:
+    float baseFreq;
     float freq, A, D, S, R;
     float ASlope, DSlope, RSlope;
     float phase, phaseStep;
@@ -83,6 +90,7 @@ public:
     bool inputPressed;
 
     Note(float f, float a, float d, float s, float r) {
+        baseFreq = f;
         updateFrequency(f);
         updateControls(a, d, s, r);
         mode = 0;
@@ -94,6 +102,13 @@ public:
         freq = (f < 0) ? 0 : f;
         phase = 0;
         phaseStep = TWOPI*freq*SAMPLE_PERIOD;
+    }
+
+    void setOctave(int newOct){
+        newOct = newOct < MIN_OCTAVE ? MIN_OCTAVE : newOct;
+        newOct = newOct > MAX_OCTAVE ? MAX_OCTAVE : newOct;
+        int p = newOct - DEFAULT_OCTAVE;
+        updateFrequency(baseFreq * pow(2, p));
     }
 
     void updateControls(float a, float d, float s, float r) {
@@ -213,6 +228,8 @@ void readAnalog() {
     }
 }
 
+int oct = DEFAULT_OCTAVE;
+
 typedef struct {
     unsigned long int keyInputs;
     int lastKey;
@@ -220,11 +237,13 @@ typedef struct {
     float D;
     float S;
     float R;
+    int octave = DEFAULT_OCTAVE;
 } SharedInfo;
 
 std::atomic<SharedInfo> SHARED_inputs;
 std::atomic<uint8_t> SHARED_flags;
-SharedInfo oldInfo = {0, 0, 0, 0, 0, 0};
+
+SharedInfo oldInfo = {0, 0, 0, 0, 0, 0, DEFAULT_OCTAVE};
 
 volatile bool updateInputFlag = false;
 volatile bool updateScreenFlag = false;
@@ -287,13 +306,14 @@ void setup() {
 // =============================================================================
 
 
-
+bool wasOctBTNPress = false;
 float stableAnalogRead[4] = {-1,-1,-1,-1};
+
 void loop() {
     if (updateInputFlag) {
         // Timed at 500uS - 4/16/26 at 1:28pm
 
-        SharedInfo newInfo = {0, 0, 0, 0, 0, 0};
+        SharedInfo newInfo = {0, 0, 0, 0, 0, 0, octave};
 
         // --- Key scanning -----------------------------------
         unsigned long int inputs = 0;
@@ -309,6 +329,8 @@ void loop() {
             inputs |= lastRAWInputs[i];
         }
         newInfo.keyInputs = inputs;
+
+        Serial.println(inputs, BIN);
 
         long int changedANDdepressed = (oldInfo.keyInputs ^ inputs) & inputs;
         if (changedANDdepressed > 0) {
@@ -342,16 +364,37 @@ void loop() {
         newInfo.A = stableAnalogRead[0]*0.1;
         newInfo.D = stableAnalogRead[0]*0.1;
         newInfo.R = stableAnalogRead[0]*0.1;
-
         newInfo.S = stableAnalogRead[0]; // Stays between 0 and 1
 
-        oldInfo = newInfo;
+        if(digitalRead(OCT_UP_P) == HIGH){
+            if(!wasOctBTNPress){
+                octave++;
+                wasOctBTNPress = true;
+            }
+        }else if(digitalRead(OCT_DOWN_P) == HIGH){
+            if(!wasOctBTNPress){
+                octave--;
+                wasOctBTNPress = true;
+            }
+        }else{
+            wasOctBTNPress = false;
+        }
+
+        octave = octave < MIN_OCTAVE ? MIN_OCTAVE : octave;
+        octave = octave > MAX_OCTAVE ? MAX_OCTAVE : octave;
+        newInfo.octave = octave;
+
         SHARED_inputs = newInfo;
 
         if(flagAnalog){
-            SHARED_flags = 1;
+            SHARED_flags |= 1;
+        }
+        
+        if(newInfo.octave != oldInfo.octave){
+            SHARED_flags |= 2;
         }
 
+        oldInfo = newInfo;
         updateInputFlag = false;
     }
 
@@ -495,10 +538,18 @@ void loop1() {
     SharedInfo newInfo = SHARED_inputs;
     uint8_t readFlags = SHARED_flags;
 
-    if(readFlags > 0){
-        SHARED_flags = 0;
-        //notes[newInfo.lastKey].updateControls(newInfo.A, newInfo.D, newInfo.S, newInfo.R);
+    if((readFlags & 1) > 0){
+        SHARED_flags &= ~(1);
+        // notes[newInfo.lastKey].updateControls(newInfo.A, newInfo.D, newInfo.S, newInfo.R);
     }
+
+    if((readFlags & 2) > 0){
+        SHARED_flags &= ~(2);
+        for(int i=0; i<numNotes; i++){
+            notes[i].setOctave(newInfo.octave);
+        }
+    }
+
 
     // Clear buffer
     for (int i = 0; i < GENERATION_SAMPLES; i++){
@@ -509,8 +560,8 @@ void loop1() {
     unsigned long shiftKeyInputs = newInfo.keyInputs;
 
     for(int i=0; i<numNotes; i++){
-        notes[i].updateInput(((shiftKeyInputs >> i) & 1) > 0); // TODO Ensure actually works
-        notes[i].getSample(); // TODO Test with keyboard so not all high by default
+        notes[i].updateInput(((shiftKeyInputs >> i) & 1) > 0);
+        notes[i].getSample();
     }
 
     for (int i = 0; i < GENERATION_SAMPLES; i++) {
