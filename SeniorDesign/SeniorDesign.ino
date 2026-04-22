@@ -64,7 +64,7 @@ uint32_t AMUXIN_MASKS[3];
 
 static Display disp(spi1, LCD_SCK, LCD_MOSI, LCD_CS, LCD_RS, LCD_RST);
 
-constexpr int SAMPLE_RATE = 44100;
+constexpr int SAMPLE_RATE = 8000;
 constexpr int MAX_AMPLITUDE = 32767;
 constexpr float SAMPLE_PERIOD = 1.0 / SAMPLE_RATE;
 constexpr int GENERATION_SAMPLES = 128;
@@ -161,11 +161,8 @@ public:
             //sampleValues[i] += amp * sinf(phase); // TODO Sine lookup table or parabolic approx if pure sine function is too slow when several notes play
 
             constexpr float B = 4.0f / 3.14159265f;
-            constexpr float C = -4.0f / (3.14159265f * 3.14159265f);
-            constexpr float P = 0.225f;
-            float y = (B * phase + C * phase * std::abs(phase));
-            y = P * (y * std::abs(y) - y) + y;   
-            sampleValues[i] += amp * y;
+            constexpr float C = -4.0f / (3.14159265f * 3.14159265f);   
+            sampleValues[i] += amp * (B * phase + C * phase * (phase < 0 ? -phase : phase));
 
             phase += phaseStep;
             if (phase >= PI) phase -= TWOPI; // Bound between -PI and PI
@@ -330,7 +327,7 @@ void loop() {
         }
         newInfo.keyInputs = inputs;
 
-        //Serial.println(inputs, BIN);
+        Serial.println(inputs, BIN);
 
         long int changedANDdepressed = (oldInfo.keyInputs ^ inputs) & inputs;
         if (changedANDdepressed > 0) {
@@ -498,43 +495,46 @@ void loop() {
 // =============================================================================
 void setup1() {
   i2s.setBitsPerSample(16);
-  i2s.begin(SAMPLE_RATE);
+  i2s.setStereo(false);
+  i2s.begin((long)SAMPLE_RATE);
 }
 
 #define AS 0.01f
 #define DS 0.01f
-#define SS 0.3f
+#define SS 0.25f
 #define RS 0.01f
 Note notes[numNotes] = {
-    Note(82.4f,   AS, DS, SS, RS), // E2
-    Note(87.3f,   AS, DS, SS, RS), // F2
-    Note(98.0f,   AS, DS, SS, RS), // G2
-    Note(110.0f,  AS, DS, SS, RS), // A2
-    Note(123.47f, AS, DS, SS, RS), // B2
     Note(130.81f, AS, DS, SS, RS), // C3
+    Note(138.59f, AS, DS, SS, RS), // C#3
     Note(146.83f, AS, DS, SS, RS), // D3
+    Note(155.56f, AS, DS, SS, RS), // D#3
     Note(164.81f, AS, DS, SS, RS), // E3
     Note(174.61f, AS, DS, SS, RS), // F3
-    Note(196.0f,  AS, DS, SS, RS), // G3
-    Note(220.0f,  AS, DS, SS, RS), // A3
+    Note(185.00f, AS, DS, SS, RS), // F#3
+    Note(196.00f, AS, DS, SS, RS), // G3
+    Note(207.65f, AS, DS, SS, RS), // G#3
+    Note(220.00f, AS, DS, SS, RS), // A3
+    Note(233.08f, AS, DS, SS, RS), // A#3
     Note(246.94f, AS, DS, SS, RS), // B3
     Note(261.63f, AS, DS, SS, RS), // C4 (Middle C)
+    Note(277.18f, AS, DS, SS, RS), // C#4
     Note(293.67f, AS, DS, SS, RS), // D4
+    Note(311.13f, AS, DS, SS, RS), // D#4
     Note(329.63f, AS, DS, SS, RS), // E4
     Note(349.23f, AS, DS, SS, RS), // F4
-    Note(392.0f,  AS, DS, SS, RS), // G4
-    Note(440.0f,  AS, DS, SS, RS), // A4
+    Note(369.99f, AS, DS, SS, RS), // F#4
+    Note(392.00f, AS, DS, SS, RS), // G4
+    Note(415.30f, AS, DS, SS, RS), // G#4
+    Note(440.00f, AS, DS, SS, RS), // A4
+    Note(466.16f, AS, DS, SS, RS), // A#4
     Note(493.88f, AS, DS, SS, RS), // B4
-    Note(523.25f, AS, DS, SS, RS), // C5
-    Note(587.33f, AS, DS, SS, RS), // D5
-    Note(659.26f, AS, DS, SS, RS), // E5
-    Note(698.46f, AS, DS, SS, RS), // F5
-    Note(783.99f, AS, DS, SS, RS), // G5
-    Note(880.00f, AS, DS, SS, RS)  // A5
+    Note(523.25f, AS, DS, SS, RS)  // C5
 };
 
 // Loop CORE 1
 void loop1() {
+    long int t0 = (long)micros();
+
     SharedInfo newInfo = SHARED_inputs;
     uint8_t readFlags = SHARED_flags;
 
@@ -546,7 +546,7 @@ void loop1() {
     if((readFlags & 2) > 0){
         SHARED_flags &= ~(2);
         for(int i=0; i<numNotes; i++){
-            notes[i].setOctave(newInfo.octave);
+            //notes[i].setOctave(newInfo.octave);
         }
     }
 
@@ -554,28 +554,39 @@ void loop1() {
     // Clear buffer
     for (int i = 0; i < GENERATION_SAMPLES; i++){
         sampleValues[i] = 0;
-        samples[i] = 0;
     }
 
     unsigned long shiftKeyInputs = newInfo.keyInputs;
 
+    int activeNotes = 0;
     for(int i=0; i<numNotes; i++){
         notes[i].updateInput(((shiftKeyInputs >> i) & 1) > 0);
         notes[i].getSample();
+        if(notes[i].mode > 0) activeNotes++; // Count how many oscillators are running
     }
+
+    float scalar = 1.0f / (1.0f + (activeNotes * 0.2f));
 
     for (int i = 0; i < GENERATION_SAMPLES; i++) {
-        float v = sampleValues[i];
-        
-        // Soft clipping (2uS)
-        if (v > 1.0f) v = 0.66f;
-        else if (v < -1.0f) v = -0.66f;
-        else v = v - 0.33f * v * v * v;
+        float v = sampleValues[i]*scalar;
 
-        samples[i] = (int16_t)(v * MAX_AMPLITUDE);
+        // v = v > 1 ? 1 : v;
+        // v = v < -1 ? -1 : v;
 
-        i2s.write(samples[i]); // TODO Takes 10 uS each per sample
-        i2s.write(samples[i]); 
+/*
+        if (v > 1.0f) v = 0.666f;
+        else if (v < -1.0f) v = -0.666f;
+        else v = v - (0.333f * v * v * v);
+*/
+
+        i2s.write((int16_t)(v * MAX_AMPLITUDE * 0.95));
+        //Serial.println((int16_t)(v * MAX_AMPLITUDE * 0.95));
+
     }
 
+    long int t1 = (long)micros();
+    //Serial.println(max);
+    //Serial.print(((float)(t1-t0)) / GENERATION_SAMPLES);
+    //Serial.print(" ");
+    //Serial.println(GENERATION_SAMPLES*22 - (t1-t0));
 }
