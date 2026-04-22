@@ -573,11 +573,9 @@ void loop1() {
         // v = v > 1 ? 1 : v;
         // v = v < -1 ? -1 : v;
 
-/*
         if (v > 1.0f) v = 0.666f;
         else if (v < -1.0f) v = -0.666f;
         else v = v - (0.333f * v * v * v);
-*/
 
         i2s.write((int16_t)(v * MAX_AMPLITUDE * 0.95));
         //Serial.println((int16_t)(v * MAX_AMPLITUDE * 0.95));
