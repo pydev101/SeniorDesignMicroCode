@@ -330,7 +330,7 @@ void loop() {
         }
         newInfo.keyInputs = inputs;
 
-        Serial.println(inputs, BIN);
+        //Serial.println(inputs, BIN);
 
         long int changedANDdepressed = (oldInfo.keyInputs ^ inputs) & inputs;
         if (changedANDdepressed > 0) {
