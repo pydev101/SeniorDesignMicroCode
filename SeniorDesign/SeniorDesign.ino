@@ -217,7 +217,7 @@ void readAnalog() {
             sio_hw->gpio_clr = AMUXIN_MASKS[1];
         }
 
-        delayMicroseconds(50);    // allow AMUX output to settle
+        delayMicroseconds(500);    // allow AMUX output to settle
         analogRead(AMUX_OUT);     // dummy read to flush ADC sample-and-hold
         delayMicroseconds(10);
 
@@ -247,7 +247,7 @@ volatile bool updateScreenFlag = false;
 
 // Humans feel lag in >15mS
 const int scanPeriod = 5000; //uS or slower (Must be slower than the funtion, but faster than at least 5mS)
-const int screenPeriod = 10000; //uS or slower (Must be slower than the funtion, but faster than at least 5mS)
+const int screenPeriod = 15000; //uS or slower (Must be slower than the funtion, but faster than at least 5mS)
 constexpr int numNotes = 25;
 
 const int rawInputLen = 3;
@@ -261,13 +261,14 @@ bool scanInputs(struct repeating_timer *t){
 }
 
 bool updateScreen(struct repeating_timer *t){
-  //updateScreenFlag = true;
+  updateScreenFlag = true;
   // TODO Time and intergrate
   return true;
 }
 
 struct repeating_timer scanTimer;
 struct repeating_timer screenTimer;
+float stableAnalogRead[4] = {-1,-1,-1,-1};
 
 // =============================================================================
 // SETUP — CORE 0
@@ -296,6 +297,11 @@ void setup() {
 
     add_repeating_timer_us(-scanPeriod,   scanInputs,   NULL, &scanTimer);
     add_repeating_timer_us(screenPeriod, updateScreen, NULL, &screenTimer);
+
+    readAnalog();
+    for (int ch = 0; ch < 4; ch++) {
+        stableAnalogRead[ch] = rawAnalogRead[ch];
+    }
 }
 
 // =============================================================================
@@ -304,14 +310,64 @@ void setup() {
 
 
 bool wasOctBTNPress = false;
-float stableAnalogRead[4] = {-1,-1,-1,-1};
+bool didTryChangeAnalog = false;
+bool wasOctUpPressed = false; // Debounce
+bool wasOctDownPressed = false; // Debounce
+int upCount = 0;
+int downCount = 0;
+bool ADSR_MODE = false;
+int drawStage = 0;
 
 void loop() {
+    SharedInfo newInfo = oldInfo;
     if (updateInputFlag) {
-        // Timed at 500uS - 4/16/26 at 1:28pm
+        bool isOctUpPressed = (digitalRead(OCT_UP_P) == HIGH);
+        bool isOctDownPressed = (digitalRead(OCT_DOWN_P) == HIGH);
 
-        SharedInfo newInfo = {0, 0, 0, 0, 0, 0, octave};
+        if(isOctUpPressed && wasOctUpPressed){
+            upCount++;
+        }
 
+        if(isOctDownPressed && wasOctDownPressed){
+            downCount++;
+        }
+
+        bool wasUpShortRelease = false;
+        bool wasUpLongRelease = false;
+        bool wasDownShortRelease = false;
+        bool wasDownLongRelease = false;
+        constexpr int decisionBoundry = 20; // Each count is 5ms
+
+        if((!isOctUpPressed) && (!wasOctUpPressed) && (upCount > 0)){
+            // Rlease occured
+            if(upCount < decisionBoundry){
+                wasUpShortRelease = true;
+                Serial.println("A");
+            }else{
+                wasUpLongRelease = true;
+                Serial.println("B");
+            }
+
+            upCount = 0;
+        }
+
+        if((!isOctDownPressed) && (!wasOctDownPressed) && (downCount > 0)){
+            // Rlease occured
+            if(downCount < decisionBoundry){
+                wasDownShortRelease = true;
+                Serial.println("C");
+            }else{
+                wasDownLongRelease = true;
+                Serial.println("D");
+            }
+
+            downCount = 0;
+        }
+
+        if(wasDownShortRelease){
+            ADSR_MODE = !ADSR_MODE;
+            if(ADSR_MODE){drawStage=0;}
+        }
         // --- Key scanning -----------------------------------
         unsigned long int inputs = 0;
         for (int i = 0; i < numNotes; i++) {
@@ -327,7 +383,7 @@ void loop() {
         }
         newInfo.keyInputs = inputs;
 
-        Serial.println(inputs, BIN);
+        //Serial.println(inputs, BIN);
 
         long int changedANDdepressed = (oldInfo.keyInputs ^ inputs) & inputs;
         if (changedANDdepressed > 0) {
@@ -341,42 +397,51 @@ void loop() {
 
         // --- Pot scanning (all 4 channels) ------------------------------
         bool flagAnalog = false;
+        bool tryChangeAnalog = false;
 
-        readAnalog();
-        for (int ch = 0; ch < 4; ch++) {
-            float v = rawAnalogRead[ch] - stableAnalogRead[ch];
-            if(v < 0){
-                v = -v;
-            }
-
-            if(v >= 0.05){
-                if(stableAnalogRead[ch] > 0){ // Failsafe to prevent overriding defaults when initalizing
-                    flagAnalog = true;
+        if(ADSR_MODE){
+            readAnalog();
+            for (int ch = 0; ch < 4; ch++) {
+                float avgV = rawAnalogRead[ch];
+                float v = avgV - stableAnalogRead[ch];
+                if(v < 0){
+                    v = -v;
                 }
-                stableAnalogRead[ch] = rawAnalogRead[ch];
+
+                if(v >= 0.05){
+                    tryChangeAnalog = true;
+                }
             }
+
+            // only update ADSR for last key if octave down is short pressed
+            if(tryChangeAnalog){
+                Serial.println("TRIED");
+                if(didTryChangeAnalog){
+                    flagAnalog = true;
+                    for (int ch = 0; ch < 4; ch++) {
+                        stableAnalogRead[ch] = rawAnalogRead[ch];
+                    }
+                    didTryChangeAnalog = false;
+                }else{
+                    didTryChangeAnalog = true;
+                }
+            }else{
+                didTryChangeAnalog = false;
+            }
+            // TODO make this log ish for between 0.001 and 1 s; GOodl what standard times are
+            newInfo.A = stableAnalogRead[0];
+            newInfo.D = stableAnalogRead[1];
+            newInfo.R = stableAnalogRead[3];
+            newInfo.S = stableAnalogRead[2]; // Stays between 0 and 1
         }
 
-        // TODO make this log ish for between 0.001 and 1 s; GOodl what standard times are
-        newInfo.A = stableAnalogRead[0]*0.1;
-        newInfo.D = stableAnalogRead[0]*0.1;
-        newInfo.R = stableAnalogRead[0]*0.1;
-        newInfo.S = stableAnalogRead[0]; // Stays between 0 and 1
 
-        if(digitalRead(OCT_UP_P) == HIGH){
-            if(!wasOctBTNPress){
-                octave++;
-                wasOctBTNPress = true;
-            }
-        }else if(digitalRead(OCT_DOWN_P) == HIGH){
-            if(!wasOctBTNPress){
-                octave--;
-                wasOctBTNPress = true;
-            }
-        }else{
-            wasOctBTNPress = false;
+        if(wasUpLongRelease){
+            octave++;
         }
-
+        if(wasDownLongRelease){
+            octave--;
+        }
         octave = octave < MIN_OCTAVE ? MIN_OCTAVE : octave;
         octave = octave > MAX_OCTAVE ? MAX_OCTAVE : octave;
         newInfo.octave = octave;
@@ -393,98 +458,99 @@ void loop() {
 
         oldInfo = newInfo;
         updateInputFlag = false;
+        wasOctUpPressed = isOctUpPressed;
+        wasOctDownPressed = isOctDownPressed;
+    }
+
+
+    // Static elements drawn once on first call
+    static bool screenInitialised = false;
+    if (!screenInitialised) {
+        Serial.println("JFIsjdsijfijsoifsjfidjsidfji");
+        disp.fill_screen(BLACK);
+
+        disp.rect(  4, 32,  28, 282, CYAN, 4);
+        disp.rect( 38, 32,  28, 282, CYAN, 4);
+        disp.rect(414, 32,  28, 282, CYAN, 4);
+        disp.rect(448, 32,  28, 282, CYAN, 4);
+        disp.rect( 72, 32, 335, 282, CYAN, 4);
+
+        disp.char_draw(  6, 4, 'A', CYAN, NO_BG, 3);
+        disp.char_draw( 40, 4, 'D', CYAN, NO_BG, 3);
+        disp.char_draw(416, 4, 'S', CYAN, NO_BG, 3);
+        disp.char_draw(450, 4, 'R', CYAN, NO_BG, 3);
+        disp.text(132, 4, "ENVELOPE", CYAN, NO_BG, 3);
+        disp.draw_logo(324, 4, CYAN, NO_BG);
+
+        screenInitialised = true;
     }
 
     // TODO Each chunk must be less than 4mS pref 3mS
-    if (updateScreenFlag) {
-        SharedInfo info = SHARED_inputs;
+    if (updateScreenFlag && ADSR_MODE) {
+        float a = oldInfo.A;
+        float d = oldInfo.D;
+        float s = oldInfo.S;
+        float r = oldInfo.R;
 
-        float a = info.A;
-        float d = info.D;
-        float s = info.S;
-        float r = info.R;
 
-        // Static elements drawn once on first call
-        static bool screenInitialised = false;
-        if (!screenInitialised) {
-            disp.fill_screen(BLACK);
+        float bar_data[4] = { a, d, s, r };
+        static const int X_STARTS[4] = { 10,  44, 420, 454 };
+        static const int X_STOPS[4]  = { 29,  63, 439, 473 };
+        
+        static int prev_x[5] = {-1, -1, -1, -1, -1};
+        static int prev_y[5] = {-1, -1, -1, -1, -1};
 
-            disp.rect(  4, 32,  28, 282, CYAN, 4);
-            disp.rect( 38, 32,  28, 282, CYAN, 4);
-            disp.rect(414, 32,  28, 282, CYAN, 4);
-            disp.rect(448, 32,  28, 282, CYAN, 4);
-            disp.rect( 72, 32, 335, 282, CYAN, 4);
+        const int d_px   = (int)(27 * d);
+        const int s_px   = (int)(27 * s);
+        const int r_px   = (int)(27 * r);
+        const int peak_y = (int)(119 - 70 * a);
 
-            disp.char_draw(  6, 4, 'A', CYAN, NO_BG, 3);
-            disp.char_draw( 40, 4, 'D', CYAN, NO_BG, 3);
-            disp.char_draw(416, 4, 'S', CYAN, NO_BG, 3);
-            disp.char_draw(450, 4, 'R', CYAN, NO_BG, 3);
-            disp.text(132, 4, "ENVELOPE", CYAN, NO_BG, 3);
-            disp.draw_logo(324, 4, CYAN, NO_BG);
+        const int new_x[5] = {
+            81,
+            116,
+            151 + d_px,
+            269 + d_px + s_px,
+            316 + d_px + s_px + r_px
+        };
+        const int new_y[5] = { 289, peak_y, 202, 202, 289 };
 
-            screenInitialised = true;
-        }
-
-        // Only redraw if a value changed beyond threshold
-        static float last_a = -1.0f, last_d = -1.0f,
-                     last_s = -1.0f, last_r = -1.0f;
-        static const float THRESHOLD = 0.02f;
-
-        bool changed = fabsf(a - last_a) >= THRESHOLD ||
-                       fabsf(d - last_d) >= THRESHOLD ||
-                       fabsf(s - last_s) >= THRESHOLD ||
-                       fabsf(r - last_r) >= THRESHOLD;
-
-        if (changed) {
-            // Redraw bars
-            float bar_data[4] = { a, d, s, r };
-            static const int X_STARTS[4] = { 10,  44, 420, 454 };
-            static const int X_STOPS[4]  = { 29,  63, 439, 473 };
-
-            for (int i = 0; i < 4; i++) {
-                disp.graph_bar_from_array(
-                    X_STARTS[i], X_STOPS[i], 308,
-                    bar_data, i,
-                    16, 270.0f, CYAN, (int32_t)BLACK);
-            }
-
-            // Erase old envelope with black lines, draw new envelope
-            static int prev_x[5] = {-1, -1, -1, -1, -1};
-            static int prev_y[5] = {-1, -1, -1, -1, -1};
-
-            const int d_px   = (int)(27 * d);
-            const int s_px   = (int)(27 * s);
-            const int r_px   = (int)(27 * r);
-            const int peak_y = (int)(119 - 70 * a);
-
-            const int new_x[5] = {
-                81,
-                116,
-                151 + d_px,
-                269 + d_px + s_px,
-                316 + d_px + s_px + r_px
-            };
-            const int new_y[5] = { 289, peak_y, 202, 202, 289 };
-
-            if (prev_x[0] != -1) {
-                for (int i = 0; i < 4; i++) {
-                    disp.line(prev_x[i], prev_y[i],
-                              prev_x[i+1], prev_y[i+1], BLACK);
+        switch(drawStage){
+            case 0:
+                disp.graph_bar_from_array(X_STARTS[0], X_STOPS[0], 308, bar_data, 0, 16, 270.0f, CYAN, (int32_t)BLACK);
+                break;
+            case 1:
+                disp.graph_bar_from_array(X_STARTS[1], X_STOPS[1], 308, bar_data, 1, 16, 270.0f, CYAN, (int32_t)BLACK);
+                break;
+            case 2:
+                disp.graph_bar_from_array(X_STARTS[2], X_STOPS[2], 308, bar_data, 2, 16, 270.0f, CYAN, (int32_t)BLACK);
+                break;
+            case 3:
+                disp.graph_bar_from_array(X_STARTS[3], X_STOPS[3], 308, bar_data, 3, 16, 270.0f, CYAN, (int32_t)BLACK);
+                break;
+            case 4:
+                // Erase old envelope with black lines, draw new envelope
+                if (prev_x[0] != -1) {
+                    for (int i = 0; i < 4; i++) {
+                        disp.line(prev_x[i], prev_y[i],
+                                    prev_x[i+1], prev_y[i+1], BLACK);
+                    }
                 }
-            }
-
-            for (int i = 0; i < 4; i++) {
-                disp.line(new_x[i], new_y[i],
-                          new_x[i+1], new_y[i+1], CYAN);
-            }
-
-            for (int i = 0; i < 5; i++) {
-                prev_x[i] = new_x[i];
-                prev_y[i] = new_y[i];
-            }
-
-            last_a = a; last_d = d; last_s = s; last_r = r;
+                break;
+            case 5:
+                for (int i = 0; i < 4; i++) {
+                    disp.line(new_x[i], new_y[i],
+                            new_x[i+1], new_y[i+1], CYAN);
+                }
+                break;
+            case 6:
+                for (int i = 0; i < 5; i++) {
+                    prev_x[i] = new_x[i];
+                    prev_y[i] = new_y[i];
+                }
+                break;
         }
+        drawStage++;
+        if(drawStage > 6){drawStage=0;}
 
         updateScreenFlag = false;
     }
@@ -540,13 +606,24 @@ void loop1() {
 
     if((readFlags & 1) > 0){
         SHARED_flags &= ~(1);
-        // notes[newInfo.lastKey].updateControls(newInfo.A, newInfo.D, newInfo.S, newInfo.R);
+        /*
+        Serial.print(newInfo.lastKey);
+        Serial.print(", ");
+        Serial.print(newInfo.A);
+        Serial.print(", ");
+        Serial.print(newInfo.D);
+        Serial.print(", ");
+        Serial.print(newInfo.S);
+        Serial.print(", ");
+        Serial.print(newInfo.R);
+        Serial.println();*/
+        notes[newInfo.lastKey].updateControls(newInfo.A, newInfo.D, newInfo.S, newInfo.R);
     }
 
     if((readFlags & 2) > 0){
         SHARED_flags &= ~(2);
         for(int i=0; i<numNotes; i++){
-            //notes[i].setOctave(newInfo.octave);
+            notes[i].setOctave(newInfo.octave);
         }
     }
 
